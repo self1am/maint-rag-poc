@@ -29,7 +29,7 @@ def store_document(
                 doc_id, doc_type, site_id, equipment_uid,
                 source_name, section, content, embedding
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector)
             """,
             (doc_id, doc_type, site_id, equipment_uid, source_name, section, content, vector),
         )

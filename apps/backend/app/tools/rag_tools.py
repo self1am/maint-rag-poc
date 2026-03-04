@@ -1,19 +1,10 @@
-import os
 from typing import Optional
 
 import psycopg
 from psycopg.rows import dict_row
 
 from app.ingest.embed import embed_texts
-
-USE_OPENAI = os.getenv("USE_OPENAI", "false").lower() == "true"
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-try:
-    from openai import OpenAI
-except Exception:  # pragma: no cover - optional dependency in mock mode
-    OpenAI = None
+from app.llm import get_llm
 
 
 def retrieve_chunks(
@@ -29,18 +20,18 @@ def retrieve_chunks(
     where = ["doc_type = %s"]
     params: list = [doc_type]
     if site_id:
-        where.append("site_id = %s")
+        where.append("(site_id = %s OR site_id IS NULL)")
         params.append(site_id)
     if equipment_uid:
-        where.append("equipment_uid = %s")
+        where.append("(equipment_uid = %s OR equipment_uid IS NULL)")
         params.append(equipment_uid)
 
     sql = f"""
         SELECT source_name, section, content,
-               1 - (embedding <=> %s) AS score
+               1 - (embedding <=> %s::vector) AS score
         FROM doc_chunks
         WHERE {" AND ".join(where)}
-        ORDER BY embedding <=> %s
+        ORDER BY embedding <=> %s::vector
         LIMIT {limit}
     """
     rows = conn.execute(sql, [vector] + params + [vector]).fetchall()
@@ -59,22 +50,33 @@ def retrieve_chunks(
 
 
 def generate_answer(query: str, evidence: list[dict]) -> str:
+    """Generate an answer using LLM based on retrieved evidence."""
     if not evidence:
         return "No matching documentation was found for that request."
 
-    if USE_OPENAI and OPENAI_API_KEY and OpenAI is not None:
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        context = "\n\n".join([f"{e['source']} - {e.get('section')}: {e['snippet']}" for e in evidence])
-        prompt = (
-            "Answer the question using only the provided documentation snippets. "
-            "If the answer is not present, say you cannot find it.\n\n"
-            f"Question: {query}\n\nDocumentation:\n{context}"
-        )
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-        return resp.choices[0].message.content.strip()
+    try:
+        llm = get_llm()
+        
+        # Build context from evidence
+        context = "\n\n".join([
+            f"[Source: {e['source']}{' - ' + e.get('section', '') if e.get('section') else ''}]\n{e['snippet']}"
+            for e in evidence
+        ])
+        
+        prompt = f"""You are a maintenance assistant. Answer the question using ONLY the provided documentation snippets.
+If the answer is not present in the documentation, say you cannot find it.
+Be concise and practical.
 
-    return "Based on the documentation, here is the most relevant excerpt: " + evidence[0]["snippet"]
+Question: {query}
+
+Documentation:
+{context}
+
+Answer:"""
+        
+        return llm.generate_text(prompt, temperature=0.3, max_tokens=500)
+    
+    except Exception as e:
+        # Fallback to simple snippet if LLM fails
+        print(f"LLM generation failed: {e}")
+        return f"Based on the documentation: {evidence[0]['snippet']}"

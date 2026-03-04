@@ -10,15 +10,23 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 _pool: ConnectionPool | None = None
 
 
+def _configure_conn(conn: psycopg.Connection) -> None:
+    register_vector(conn)
+
+
 def init_db() -> None:
     global _pool
     if _pool is not None:
         return
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not set")
-    _pool = ConnectionPool(conninfo=DATABASE_URL, min_size=1, max_size=10, open=True)
-    with _pool.connection() as conn:
-        register_vector(conn)
+    _pool = ConnectionPool(
+        conninfo=DATABASE_URL,
+        min_size=1,
+        max_size=10,
+        open=True,
+        configure=_configure_conn,
+    )
     _run_schema_if_needed()
 
 

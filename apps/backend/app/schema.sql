@@ -92,4 +92,4 @@ CREATE INDEX IF NOT EXISTS idx_doc_chunks_meta
     ON doc_chunks (doc_type, site_id, equipment_uid);
 
 CREATE INDEX IF NOT EXISTS idx_doc_chunks_embedding
-    ON doc_chunks USING ivfflat (embedding vector_cosine_ops);
+    ON doc_chunks USING hnsw (embedding vector_cosine_ops);

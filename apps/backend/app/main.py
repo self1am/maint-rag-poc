@@ -57,6 +57,60 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/llm/test")
+def test_llm() -> dict:
+    """Test LLM integration"""
+    try:
+        from app.llm import get_llm
+        llm = get_llm()
+        response = llm.generate_text("Say 'LLM integration working!' in a friendly way.", temperature=0.5)
+        return {
+            "status": "success",
+            "provider": llm.provider,
+            "response": response
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@app.get("/llm/list-models")
+def list_gemini_models() -> dict:
+    """List all available Gemini models"""
+    try:
+        import google.generativeai as genai
+        import os
+        
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return {"status": "error", "error": "GEMINI_API_KEY not set"}
+        
+        genai.configure(api_key=api_key)
+        models = genai.list_models()
+        
+        available_models = []
+        for m in models:
+            available_models.append({
+                "name": m.name,
+                "display_name": m.display_name,
+                "supported_methods": m.supported_generation_methods,
+                "supports_generate": "generateContent" in m.supported_generation_methods
+            })
+        
+        return {
+            "status": "success",
+            "models": available_models,
+            "total": len(available_models)
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
 @app.post("/seed")
 def seed() -> dict:
     with get_conn() as conn:
@@ -169,9 +223,8 @@ def chat(request: ChatRequest) -> dict:
             }
             answer_parts.append("Suggested a draft work order based on the request.")
 
-    answer = " ".join([part for part in answer_parts if part])
-    if not answer:
-        answer = "I can help with manuals, schedules, employees, inventory, and work orders."
+    # Use LLM to synthesize a coherent response from all gathered context
+    answer = _synthesize_answer(request.message, answer_parts, evidence, checks, suggested_work_order)
 
     response: dict[str, Any] = {"answer": answer}
     if evidence:
@@ -181,6 +234,68 @@ def chat(request: ChatRequest) -> dict:
     if suggested_work_order:
         response["suggested_work_order"] = suggested_work_order
     return response
+
+
+def _synthesize_answer(
+    user_message: str,
+    answer_parts: list[str],
+    evidence: list[dict],
+    checks: dict,
+    suggested_work_order: Optional[dict]
+) -> str:
+    """Use LLM to create a coherent, helpful response from gathered context"""
+    from app.llm import get_llm
+    
+    # If no context gathered, use simple fallback
+    if not answer_parts and not evidence and not checks:
+        return "I can help with manuals, schedules, employees, inventory, and work orders."
+    
+    # Build context summary for LLM
+    context_parts = []
+    
+    if evidence:
+        context_parts.append(f"Retrieved {len(evidence)} relevant document chunks")
+        for ev in evidence[:2]:  # Show first 2 chunks
+            snippet = ev.get('snippet', ev.get('content', ''))
+            context_parts.append(f"- {snippet[:150]}...")
+    
+    if checks.get("schedule"):
+        sched = checks["schedule"]
+        context_parts.append(f"Schedule: Equipment {sched['equipment_uid']} has maintenance on {sched['next_date']}")
+    
+    if checks.get("employees"):
+        emp_count = len(checks["employees"])
+        available = [e for e in checks["employees"] if not e.get("conflicts")]
+        context_parts.append(f"Employees: Found {emp_count} qualified, {len(available)} available")
+    
+    if checks.get("inventory"):
+        inv_count = len(checks["inventory"])
+        context_parts.append(f"Inventory: Found {inv_count} matching parts")
+    
+    if suggested_work_order:
+        context_parts.append(f"Suggested work order for {suggested_work_order.get('equipment_uid')}")
+    
+    context = "\n".join(context_parts)
+    
+    # Ask LLM to synthesize a helpful response
+    llm = get_llm()
+    prompt = f"""You are a maintenance assistant. Based on the information gathered, provide a clear, helpful response to the user.
+
+User question: {user_message}
+
+Context gathered:
+{context}
+
+Provide a concise, actionable response (2-4 sentences). Focus on answering their question directly."""
+    
+    try:
+        synthesized = llm.generate_text(prompt, temperature=0.3)
+        return synthesized.strip()
+    except Exception as e:
+        print(f"LLM synthesis failed: {e}")
+        # Fallback to simple joining
+        answer = " ".join([part for part in answer_parts if part])
+        return answer if answer else "I can help with manuals, schedules, employees, inventory, and work orders."
 
 
 @app.get("/workorders")
@@ -302,15 +417,143 @@ def ingest_csv(kind: str, file: UploadFile = File(...)) -> dict:
     return {"status": "ok", "rows": inserted}
 
 
+@app.post("/ingest/smart-csv")
+def ingest_csv_smart(file: UploadFile = File(...)) -> dict:
+    """
+    Intelligent CSV upload: automatically infers schema and maps to database.
+    Accepts ANY CSV format - no predefined columns required.
+    """
+    import csv
+    from app.tools.llm_analyzer import infer_csv_schema
+    
+    content = file.file.read().decode(errors="ignore").splitlines()
+    reader = csv.DictReader(content)
+    
+    # Read all rows
+    rows = list(reader)
+    if not rows:
+        raise HTTPException(status_code=400, detail="CSV file is empty")
+    
+    headers = list(rows[0].keys())
+    sample_rows = [[row.get(h, "") for h in headers] for row in rows[:10]]
+    
+    # Use LLM to infer schema
+    schema = infer_csv_schema(headers, sample_rows, file.filename or "upload.csv")
+    
+    if schema.get("confidence") == "low" or schema.get("data_type") == "unknown":
+        return {
+            "status": "needs_review",
+            "schema": schema,
+            "message": "Could not confidently detect schema. Please review mapping.",
+            "headers": headers,
+            "sample_rows": sample_rows[:5]
+        }
+    
+    # Auto-import based on detected type
+    data_type = schema.get("data_type")
+    column_mapping = schema.get("column_mapping", {})
+    inserted = 0
+    
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        
+        for row in rows:
+            try:
+                if data_type == "employees":
+                    cursor.execute(
+                        """
+                        INSERT INTO employees (employee_id, name, site_id, certifications)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (employee_id) DO UPDATE SET
+                            name = EXCLUDED.name,
+                            site_id = EXCLUDED.site_id,
+                            certifications = EXCLUDED.certifications
+                        """,
+                        (
+                            _map_field(row, column_mapping, "employee_id"),
+                            _map_field(row, column_mapping, "name"),
+                            _map_field(row, column_mapping, "site_id"),
+                            _parse_array(_map_field(row, column_mapping, "certifications")),
+                        ),
+                    )
+                elif data_type == "schedules":
+                    cursor.execute(
+                        """
+                        INSERT INTO maintenance_schedule (site_id, equipment_uid, next_date, required_certs, est_duration_min)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (
+                            _map_field(row, column_mapping, "site_id"),
+                            _map_field(row, column_mapping, "equipment_uid"),
+                            _map_field(row, column_mapping, "next_date"),
+                            _parse_array(_map_field(row, column_mapping, "required_certs")),
+                            int(_map_field(row, column_mapping, "est_duration_min") or 60),
+                        ),
+                    )
+                elif data_type == "inventory":
+                    cursor.execute(
+                        """
+                        INSERT INTO inventory (site_id, part_id, part_name, qty, reorder_level)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (site_id, part_id) DO UPDATE SET
+                            part_name = EXCLUDED.part_name,
+                            qty = EXCLUDED.qty,
+                            reorder_level = EXCLUDED.reorder_level
+                        """,
+                        (
+                            _map_field(row, column_mapping, "site_id"),
+                            _map_field(row, column_mapping, "part_id"),
+                            _map_field(row, column_mapping, "part_name"),
+                            int(_map_field(row, column_mapping, "qty") or 0),
+                            int(_map_field(row, column_mapping, "reorder_level") or 0),
+                        ),
+                    )
+                else:
+                    continue  # Skip unknown types
+                    
+                inserted += 1
+            except Exception as e:
+                print(f"Failed to insert row: {e}")
+                continue
+        
+        conn.commit()
+    
+    return {
+        "status": "ok",
+        "data_type": data_type,
+        "rows": inserted,
+        "schema": schema,
+        "message": f"Successfully imported {inserted} {data_type} records"
+    }
+
+
+def _map_field(row: dict, mapping: dict, field: str) -> str:
+    """Helper to map CSV column to database field"""
+    for col_name, col_info in mapping.items():
+        if col_info.get("field") == field:
+            return row.get(col_name, "")
+    return ""
+
+
+def _parse_array(value: str) -> list:
+    """Parse comma-separated values into array"""
+    if not value:
+        return []
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
 @app.post("/ingest/docs")
 def ingest_docs(
     files: list[UploadFile] = File(...),
     doc_type: str = "manual",
     site_id: Optional[str] = None,
     equipment_uid: Optional[str] = None,
+    analyze: bool = True,  # Enable smart analysis by default
 ) -> dict:
     if doc_type not in {"manual", "preventive"}:
         raise HTTPException(status_code=400, detail="doc_type must be manual or preventive")
+
+    from app.tools.llm_analyzer import analyze_maintenance_document
 
     results = []
     with get_conn() as conn:
@@ -320,6 +563,8 @@ def ingest_docs(
             if not text.strip():
                 results.append({"source": upload.filename, "status": "empty"})
                 continue
+            
+            # Store document chunks for RAG
             stored = store_document(
                 conn,
                 text,
@@ -328,6 +573,22 @@ def ingest_docs(
                 equipment_uid=equipment_uid,
                 source_name=upload.filename or "document",
             )
-            results.append({"source": upload.filename, **stored})
+            
+            result = {"source": upload.filename, **stored}
+            
+            # Smart analysis: extract structured data
+            if analyze:
+                analysis = analyze_maintenance_document(text, upload.filename or "document")
+                result["analysis"] = analysis
+                
+                # Log what was found
+                if analysis.get("equipment"):
+                    result["found_equipment"] = len(analysis["equipment"])
+                if analysis.get("tasks"):
+                    result["found_tasks"] = len(analysis["tasks"])
+                if analysis.get("employees"):
+                    result["found_employees"] = len(analysis["employees"])
+            
+            results.append(result)
 
     return {"status": "ok", "results": results}
