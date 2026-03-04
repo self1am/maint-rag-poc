@@ -116,16 +116,19 @@ Headers: {", ".join(headers)}
 Sample rows:
 {sample_data}
 
-Determine:
-1. What type of data is this? (employees, equipment, schedules, inventory, tasks, etc.)
-2. Map each column to our internal schema fields
-3. Identify any data transformations needed
+Our database schema uses these field names:
+- employees: employee_id, site_id, name, certifications (array)
+- equipment: equipment_uid, site_id, name
+- schedules: site_id, equipment_uid, next_date, required_certs (array), est_duration_min
+- inventory: site_id, part_id, part_name, qty, reorder_level
+
+Map each CSV column to the correct database field name above.
 
 Return JSON:
 {{
   "data_type": "employees|equipment|schedules|inventory|tasks|unknown",
   "column_mapping": {{
-    "original_column_name": {{"field": "our_field_name", "type": "string|integer|date|array"}}
+    "original_column_name": {{"field": "database_field_name", "type": "string|integer|date|array"}}
   }},
   "transformations": [
     "description of any needed data transformations"

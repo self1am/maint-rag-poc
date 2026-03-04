@@ -460,22 +460,32 @@ def ingest_csv_smart(file: UploadFile = File(...)) -> dict:
         for row in rows:
             try:
                 if data_type == "employees":
+                    emp_id = _map_field(row, column_mapping, "employee_id")
                     cursor.execute(
                         """
-                        INSERT INTO employees (employee_id, name, site_id, certifications)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO employees (employee_id, name, site_id)
+                        VALUES (%s, %s, %s)
                         ON CONFLICT (employee_id) DO UPDATE SET
                             name = EXCLUDED.name,
-                            site_id = EXCLUDED.site_id,
-                            certifications = EXCLUDED.certifications
+                            site_id = EXCLUDED.site_id
                         """,
                         (
-                            _map_field(row, column_mapping, "employee_id"),
+                            emp_id,
                             _map_field(row, column_mapping, "name"),
                             _map_field(row, column_mapping, "site_id"),
-                            _parse_array(_map_field(row, column_mapping, "certifications")),
                         ),
                     )
+                    # Insert certifications into separate table
+                    certs = _parse_array(_map_field(row, column_mapping, "certifications"))
+                    if certs:
+                        # Clear existing certs
+                        cursor.execute("DELETE FROM employee_certs WHERE employee_id = %s", (emp_id,))
+                        # Insert new certs
+                        for cert in certs:
+                            cursor.execute(
+                                "INSERT INTO employee_certs (employee_id, cert) VALUES (%s, %s)",
+                                (emp_id, cert)
+                            )
                 elif data_type == "schedules":
                     cursor.execute(
                         """
