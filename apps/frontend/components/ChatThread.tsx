@@ -122,7 +122,7 @@ export function ChatThread({ onSendMessage, onWorkOrderSuggested }: ChatThreadPr
                     </div>
                     <p className="text-xs text-muted-foreground">
                       A work order draft has been prepared based on this conversation.
-                      Use the "Create Work Order" button in the context panel to proceed.
+                      Use the &quot;Create Work Order&quot; button in the context panel to proceed.
                     </p>
                   </div>
                 )}
@@ -156,6 +156,8 @@ export function ChatThread({ onSendMessage, onWorkOrderSuggested }: ChatThreadPr
             className="flex-1 rounded-lg border border-input bg-background px-4 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
           />
           <button
+            type="button"
+            name="send"
             onClick={handleSend}
             disabled={loading || !input.trim()}
             className="rounded-lg bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90 disabled:opacity-50"

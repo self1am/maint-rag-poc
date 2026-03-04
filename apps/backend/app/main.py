@@ -1,8 +1,12 @@
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from pydantic import BaseModel
+
+# Load environment variables from .env file
+load_dotenv()
 
 from app.db import get_conn, init_db
 from app.ingest.loaders import load_text_from_bytes

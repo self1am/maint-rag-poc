@@ -130,7 +130,7 @@ def create_work_order(
             payload.get("required_certs", []),
             payload.get("employee_id"),
             status,
-            actor_id,
+            payload.get("created_by", actor_id),
             approved_by,
         ),
     ).fetchone()
